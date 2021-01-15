@@ -15,5 +15,5 @@ Benötigte FB´s:
 	-> FB_ServoAchse
 
 	
-Benötigte Lizensen:
+Benötigte Lizenzen:
 	-> TF5000
