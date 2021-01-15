@@ -1,0 +1,447 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4018.5">
+  <POU Name="FB_ServoAchse" Id="{8e48068b-b0da-4dab-906a-0874eebf39c2}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_ServoAchse
+VAR_INPUT
+	cmd : FB_ServoAchse_Cmd;
+	//Hier können die Endschalter gemapt werden. Zur freigabe wird ein TRUE-Signal (Öffner-Schalter) benötigt!
+	endschalter : FB_ServoAchse_Endschalter;
+END_VAR
+
+VAR_OUTPUT
+	status : FB_ServoAchse_Status;
+END_VAR
+
+VAR
+	
+
+//Die Laufvariable für den Ablauf der StateMachine im FB (als Enumeration ausgeführt)
+	_state : FB_ServoAchse_State := FB_ServoAchse_State.STAND_BY; //Initialisieren
+	
+	//Hier wird der letzte state gespeichert. Wird benötigt für die firstRun Funktionalität
+	_alterState : FB_ServoAchse_State;
+	//Wird in einen neuen state gesprungen ist firstRun für den ersten Zyklusdurchlauf des States TRUE
+	_firstRun : BOOL;
+	
+	//TimeOut timer
+	_timeOut : TON;
+	
+	//Interne Kopie des Positions- und Geschwindigkeitswerts den der Nutzer vorgibt. 
+	//So wird verhindert, dass während des verfahrens die Werte durch den Nutzer unzulässig verändert werden
+	_position			: LREAL; 
+	_geschwindigkeit	: LREAL; 
+	
+	//Ansteuerung der MotionControlle FBs		
+	_fbPowerEnable : BOOL;
+	
+//Benötigte FBs für die MotionControlle:
+	handle_Axis : Axis_Ref;
+	fb_Power : MC_Power;
+	fb_Reset : MC_Reset;
+	fb_ReadActualPosition : MC_ReadActualPosition;
+	fb_ReadActualVelocity : MC_ReadActualVelocity;
+	fb_ReadStatus : MC_ReadStatus;
+	fb_ReadParameterSet : MC_ReadParameterSet; //ließt die verfügbaren Parameter der Achse ein und schreibt sie in "struct_AxisParameterSet"
+	struct_AxisParameterSet : ST_AxisParameterSet;
+	fb_Jog : MC_Jog;
+	fb_MoveAbsolute_1 : MC_MoveAbsolute;
+	fb_MoveAbsolute_2 : MC_MoveAbsolute; //Es werden zwei MC_MoveAbsolute benötigt, da aus performance Gründen ein Fahrauftrag durch einen aktuelleren überschrieben werden kann
+	fb_Halt : MC_Halt;
+	//Die Variable dient der Unterscheidung, welcher fb_MoveAbsolute gerade den aktuellen Fahrauftrag ausführt
+	_aktuellerMoveAbs : FB_ServoAchse_MoveAbs; // fb_MoveAbsolute_1 == 1 | fb_MoveAbsolute_2 == 2
+	
+	
+END_VAR
+
+VAR CONSTANT
+	TIME_OUT_OFFSET : TIME := T#10S;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[
+(*
+Beschreibung:
+Der FB wird verwendet um eine Linear-Achse anzusteuern.
+Die Antriebe die verwendet werden, besitzen absolut-multi-turn Drehgeber. Eine referenzierfahrt ist somit hinnfällig.
+Besonders ist, dass ein abgegebener Fahrauftrag nicht zu ende gefahren werden muss. Es ist möglich einen aktuelleren
+Fahrauftrag abzugeben un damit einen aktuellen Fahrauftrag abzulösen.
+
+Datum: 2017/JAN/05
+Version: 1.0.0.0
+
+Autor: P. Hahn
+	
+Benötigte Bibliotheken:
+	-> Tc2_MC2
+	
+Benötigte FB´s:
+	-> keine selbsterstellen
+
+	
+Benötigte Lizensen:
+	-> TF5000
+*)
+
+//Wird in einen neuen state gesprungen ist firstRun für den ersten Zyklusdurchlauf des States TRUE 
+_firstRun := firstRun();
+
+
+CASE _state OF
+	
+		
+	FB_ServoAchse_State.STAND_BY:
+		//Achsen enablen
+		IF cmd.enable THEN
+			cmd.enable := FALSE;
+			status.busy := TRUE;
+			_fbPowerEnable := TRUE;
+			_state := FB_ServoAchse_State.ENABLE;
+			
+		//Verfahre auf absolute Position	
+		ELSIF cmd.fahreAbs THEN
+			cmd.fahreAbs := FALSE;
+			status.busy := TRUE;
+			//Kontrollieren ob die Achse enabled ist
+			IF status.enabled THEN
+				fb_MoveAbsolute_1.Execute := TRUE;
+				_aktuellerMoveAbs := FB_ServoAchse_MoveAbs.FB_MOVE_ABSOLUTE_1;
+				fahrInfosCopy();
+				_state := FB_ServoAchse_State.FAHRE_ABSOLUT;
+			ELSE
+				callError('Es wurde ein absoluter Fahrbefehl gegeben während die Achse nicht enabled ist');
+			END_IF
+			
+		//Hand-verfahren (Tippbetrieb)
+		ELSIF cmd.hand.pos OR cmd.hand.neg THEN
+			status.busy := TRUE;
+			IF status.enabled THEN
+				_state := FB_ServoAchse_State.HAND;
+			ELSE
+				callError('Es wurde ein Hand-Fahrbefehl gegeben während die Achse nicht enabled ist');
+			END_IF
+		END_IF
+		
+		//Sollte zuvor ein Fehler-Reset angefordert worden sein, wird dieser hier zurückgesetzt
+		fb_Reset.Execute := FALSE;
+
+		
+		
+	FB_ServoAchse_State.ENABLE:
+		//Warten bis die Achse enabled ist, dann zurückspringen in Standby
+		IF fb_Power.Status AND NOT fb_Power.Error THEN
+			status.busy := FALSE;
+			_state := FB_ServoAchse_State.STAND_BY;
+		ELSIF fb_Power.Error THEN
+			_fbPowerEnable := FALSE;
+			callError('Beim enablen der Achse ist ein Fehler aufgetreten');
+		END_IF
+	
+	
+		
+		
+	FB_ServoAchse_State.FAHRE_ABSOLUT:		
+		//Sollte während der Fahrt ein aktuellerer Fahrauftrag abgegeben werden, so wird dieser übernommen
+		IF cmd.fahreAbs THEN
+			cmd.fahreAbs := FALSE;
+			moveAbsExecute();
+			fahrInfosCopy();
+		//Sonst warten bis die Achse ihren Fahrauftrag abgeschlossen hat.
+		ELSIF moveAbsFinished() THEN
+			status.busy := FALSE;
+			_state := FB_ServoAchse_State.STAND_BY;
+		ELSIF moveAbsError() THEN
+			callError('Während der Absolutfahrt ist ein Fehler aufgetreten');
+		END_IF	
+	
+		
+	
+	FB_ServoAchse_State.HAND:
+		//Sollten beide Richtungen auf TRUE gesetzt werden gibt fb_Jog dem pos-Fahrweg vorrang
+		fb_Jog.JogForward := cmd.hand.pos;
+		fb_Jog.JogBackwards := cmd.hand.neg;
+		IF fb_Jog.Error THEN
+			callError('Während des Hand-Fahrens ist ein Fehler aufgetreten');
+		ELSIF NOT cmd.hand.pos AND NOT cmd.hand.neg THEN 
+			status.busy := FALSE;
+			_state := FB_ServoAchse_State.STAND_BY;
+		END_IF
+	
+		
+		
+	FB_ServoAchse_State.ERROR_HANDLER:
+		status.error := TRUE;
+		status.busy := FALSE;
+		_fbPowerEnable := FALSE;
+		//Warten auf reset	
+		IF cmd.reset THEN
+			cmd.reset := FALSE;
+			_fbPowerEnable := FALSE;
+			fb_MoveAbsolute_1.Execute := FALSE;
+			fb_MoveAbsolute_2.Execute := FALSE;
+			status.error := FALSE;
+			status.errorMeldung := '';
+			fb_Reset.Execute := TRUE;
+			_state := FB_ServoAchse_State.STAND_BY;
+		END_IF
+END_CASE
+
+
+//Da ein Disable-Befehl zu jedem Zeitpunkt möglich sein soll wird dieser Befehl auserhalb der Statemachine abgefragt!
+IF cmd.disable THEN
+	cmd.disable := FALSE;
+	_fbPowerEnable := FALSE;
+	status.busy := FALSE;
+END_IF
+
+
+
+//Sollte im Handle ein Fehler gemeldet werden, der nicht von einem der States angezeigt wird, und um den sich fb_Reset nicht
+//aktuell kümmert, dann wird eine Meldung hier ausgegben
+IF handle_Axis.Status.Error AND status.errorMeldung = '' AND fb_Reset.Done THEN
+	handle_Axis.Status.ErrorID; //FehlerID der Achse zur Einsicht für den Programmierer
+	callError('Der AX-ServoControler meldet einen Fehler');
+END_IF
+
+	
+
+
+
+
+//Die Zeit für den TimeOut ermitteln
+IF _firstRun OR fb_MoveAbsolute_1.Execute OR fb_MoveAbsolute_2.Execute THEN
+	//Sollte verfahren werden muss die Zeit an die Strecke und die Geschwindigkeit angepasst werden
+	IF _state = FB_ServoAchse_State.FAHRE_ABSOLUT THEN
+		_timeOut.PT := LREAL_TO_TIME(ABS(_position - status.positionAktuell) / status.geschwindAktuell * 1000) + TIME_OUT_OFFSET;
+	//Ansonsten wird die gewöhnliche TimeOut Zeit benutzt
+	ELSE 
+		_timeOut.PT := TIME_OUT_OFFSET;
+	END_IF
+END_IF
+
+
+//Den TimeOut aufrufen
+_timeOut(
+	IN := startTimer() AND NOT (fb_MoveAbsolute_1.Execute OR fb_MoveAbsolute_2.Execute) );
+//Sollte der TimeOut abgelaufen sein wird ein Error ausgelöst
+IF _timeOut.Q THEN
+	callError('Beim Ablauf ist es zu einer Zeitüberschreitung gekommen');
+END_IF
+
+
+
+
+
+
+
+
+//Beckhoff eigene FBs für die MotionControlle:
+//Benötigte libs:	Tc2_MC2
+
+// Enablen bzw. disablen der Achse
+fb_Power(
+	Enable := _fbPowerEnable,
+	Enable_Positive := endschalter.pos,
+	Enable_Negative := endschalter.neg,
+	Override := 100,
+	Axis := handle_Axis,
+	Status => status.enabled);
+
+
+
+//Aktuelle Position auslesen
+fb_ReadActualPosition(
+	Enable := TRUE,
+	Axis := handle_Axis,
+	Position => status.positionAktuell);
+
+//Aktuelle Geschwindigkeit auslesen	
+fb_ReadActualVelocity(
+	Enable := TRUE,
+	Axis := handle_Axis);
+status.geschwindAktuell := ABS(fb_ReadActualVelocity.ActualVelocity);
+	
+
+
+// Reset der Achse
+fb_Reset(
+	Axis := handle_Axis);
+
+	
+	
+//Handverfahren
+fb_Jog(
+	Axis := handle_Axis,
+	Mode := MC_JOGMODE_STANDARD_SLOW); //Als Geschwindigkeit, wird der Wert verwendet, der im AX-Parameter "Manual Velocity (Slow)" angegeben ist.
+
+
+
+// Absolutbewegung
+fb_MoveAbsolute_1(
+	Position := _position,
+	Velocity := _geschwindigkeit,
+	BufferMode := Tc2_MC2.MC_Aborting, //Sorgt dafür, dass ein aktueller Fahrauftrag unterbrochen wird sofern ein aktuellerer Fahrauftrag des anderen fb_MoveAbsolute vorliegt.
+	Axis := handle_Axis);
+//High-Flanke zurücksetzen
+fb_MoveAbsolute_1.Execute := FALSE;
+
+
+fb_MoveAbsolute_2(
+	Position := _position,
+	Velocity := _geschwindigkeit,
+	BufferMode := Tc2_MC2.MC_Aborting, //Sorgt dafür, dass ein aktueller Fahrauftrag unterbrochen wird sofern ein aktuellerer Fahrauftrag des anderen fb_MoveAbsolute vorliegt.
+	Axis := handle_Axis);
+//High-Flanke zurücksetzen
+fb_MoveAbsolute_2.Execute := FALSE;
+
+
+
+// Stoppen der Bewegung
+fb_Halt(
+	Execute := cmd.halt, //cmd.halt kann immer befohlen werden
+	Axis := handle_Axis);
+IF cmd.halt THEN
+	cmd.halt := FALSE;
+	status.busy := FALSE;
+	fb_MoveAbsolute_1.Execute := FALSE;
+	fb_MoveAbsolute_2.Execute := FALSE;
+	_state := FB_ServoAchse_State.STAND_BY;
+END_IF
+	
+	
+	
+//Der FB liest den Status der Achse aus. Dabei wird bei jedem Zyklus der Status in "handle_Axis" aktualisiert
+fb_ReadStatus(
+	Enable := TRUE,
+	Axis := handle_Axis);
+	
+	
+	
+//Die aktualisierten Daten dem Status übergeben
+status.bewegungAktiv := NOT handle_Axis.Status.NotMoving;
+status.positionErreicht := handle_Axis.Status.InTargetPosition;
+
+
+
+
+
+	
+
+
+
+]]></ST>
+    </Implementation>
+    <Method Name="callError" Id="{e3346ac8-0497-4a24-8b32-8aaee9ca98ce}">
+      <Declaration><![CDATA[METHOD PROTECTED callError
+VAR_INPUT
+	errorMeldung : STRING(255);
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[status.errorMeldung := errorMeldung;
+_state := FB_ServoAchse_State.ERROR_HANDLER;
+RETURN;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="fahrInfosCopy" Id="{fb408ef9-817e-4f21-9397-e18ec458a8e7}">
+      <Declaration><![CDATA[METHOD PROTECTED fahrInfosCopy
+VAR_INPUT
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[_position := cmd.position;
+_geschwindigkeit := cmd.geschwindigkeit;
+RETURN;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="firstRun" Id="{0fef2cbd-8929-413b-b345-e616fe857ff9}">
+      <Declaration><![CDATA[METHOD PROTECTED firstRun : BOOL
+VAR_INPUT
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF ( _state <> _alterState ) THEN
+	FirstRun := TRUE;
+ELSE
+	FirstRun := FALSE;
+END_IF
+
+_alterState := _state;
+RETURN;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="moveAbsError" Id="{64ceee98-9d74-452b-a657-a46c9b7f2f5a}">
+      <Declaration><![CDATA[METHOD PROTECTED moveAbsError : BOOL
+VAR_INPUT
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+
+//Den aktuellen FB ermitteln und dann überprüfen, ob ein Fehler vorliegt
+IF _aktuellerMoveAbs = FB_ServoAchse_MoveAbs.FB_MOVE_ABSOLUTE_1 THEN
+	moveAbsError := fb_MoveAbsolute_1.Error;
+ELSE
+	moveAbsError := fb_MoveAbsolute_2.Error;
+END_IF
+RETURN;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="moveAbsExecute" Id="{7aae8961-49fc-4be5-896f-1cba72d5d88f}">
+      <Declaration><![CDATA[METHOD PROTECTED moveAbsExecute
+VAR_INPUT
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+//Den aktuellen FB ermitteln und dann den anderen starten
+IF _aktuellerMoveAbs = FB_ServoAchse_MoveAbs.FB_MOVE_ABSOLUTE_1 THEN
+	fb_MoveAbsolute_2.Execute := TRUE;
+	_aktuellerMoveAbs := FB_ServoAchse_MoveAbs.FB_MOVE_ABSOLUTE_2;
+ELSE
+	fb_MoveAbsolute_1.Execute := TRUE;
+	_aktuellerMoveAbs := FB_ServoAchse_MoveAbs.FB_MOVE_ABSOLUTE_1;
+END_IF
+RETURN;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="moveAbsFinished" Id="{d496e4da-e086-4931-8d4f-5e69531971f4}">
+      <Declaration><![CDATA[METHOD PROTECTED moveAbsFinished : BOOL
+VAR_INPUT
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+
+//Den aktuellen FB ermitteln und dann überprüfen, ob er fertig ist
+IF _aktuellerMoveAbs = FB_ServoAchse_MoveAbs.FB_MOVE_ABSOLUTE_1 THEN
+	moveAbsFinished := fb_MoveAbsolute_1.Done AND NOT fb_MoveAbsolute_1.Error;
+ELSE
+	moveAbsFinished := fb_MoveAbsolute_2.Done AND NOT fb_MoveAbsolute_2.Error;
+END_IF
+RETURN;
+
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="startTimer" Id="{c39cb895-77be-48fe-bbf5-0ad7fbc8938d}">
+      <Declaration><![CDATA[METHOD PROTECTED startTimer : BOOL
+VAR_INPUT
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT _firstRun AND ( _state <> FB_ServoAchse_State.STAND_BY ) AND (_state <> FB_ServoAchse_State.ERROR_HANDLER) AND 
+(_state <> FB_ServoAchse_State.HAND) THEN
+	startTimer := TRUE;
+ELSE
+	startTimer := FALSE;
+END_IF
+
+//Workaround um den Timer vorläufig abzuschalten
+//Das neustarten des Timer wenn ein neuer Fahrauftrag abgegeben wurde bevor der alte Fahrauftrag abgeschlossen ist funktioniert noch nicht richtig!
+//Daher wurde die TimeOutfunktion herausgenommen :-/
+startTimer := FALSE;
+
+RETURN;]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

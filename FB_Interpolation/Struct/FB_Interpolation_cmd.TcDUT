@@ -1,0 +1,19 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4018.5">
+  <DUT Name="FB_Interpolation_cmd" Id="{39132136-4b32-43fc-bc83-d01054177aac}">
+    <Declaration><![CDATA[TYPE FB_Interpolation_cmd :
+STRUCT
+	enable 			: BOOL;
+	disable			: BOOL;
+	hand			: FB_Interpolation_Hand;
+	fahreAbs		: BOOL;
+	position_X		: LREAL;
+	position_Y		: LREAL;
+	geschwindigkeit	: LREAL;
+	halt			: BOOL;
+	reset 			: BOOL;
+END_STRUCT
+END_TYPE
+]]></Declaration>
+  </DUT>
+</TcPlcObject>

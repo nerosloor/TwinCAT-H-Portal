@@ -1,0 +1,18 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4018.5">
+  <DUT Name="FB_Interpolation_status" Id="{51111a46-454d-4443-abf6-0fba645521f0}">
+    <Declaration><![CDATA[TYPE FB_Interpolation_status :
+STRUCT
+	busy				: BOOL;
+	error				: BOOL;
+	errorMeldung 		: STRING(255);
+	enabled				: BOOL;
+	bewegungAktiv 		: BOOL;
+	positionAktuell_X	: LREAL;
+	positionAktuell_Y	: LREAL;
+	positionErreicht 	: BOOL;
+END_STRUCT
+END_TYPE
+]]></Declaration>
+  </DUT>
+</TcPlcObject>

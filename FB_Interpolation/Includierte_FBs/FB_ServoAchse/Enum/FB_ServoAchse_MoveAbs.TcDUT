@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4018.5">
+  <DUT Name="FB_ServoAchse_MoveAbs" Id="{cc00f0b3-836c-472b-aa67-4a3b2ebbd991}">
+    <Declaration><![CDATA[TYPE FB_ServoAchse_MoveAbs :
+(
+	UNDEFINIERT := 0,
+	FB_MOVE_ABSOLUTE_1,
+	FB_MOVE_ABSOLUTE_2
+);
+END_TYPE
+]]></Declaration>
+  </DUT>
+</TcPlcObject>

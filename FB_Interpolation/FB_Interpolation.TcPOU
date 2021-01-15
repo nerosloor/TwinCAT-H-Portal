@@ -1,0 +1,409 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4018.5">
+  <POU Name="FB_Interpolation" Id="{915c982c-675c-40c7-b97e-016458c977a9}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_Interpolation
+VAR_INPUT
+	cmd : FB_Interpolation_cmd;
+	//Soll bei dem verfahren die Geschwindigkeit interpoliert werden, wird der Eingang TRUE gesetzt
+	geschwinInterpolieren : BOOL;
+	////Hier können die 4 Endschalter des H-Portals gemapt werden. Zur freigabe wird ein TRUE-Signal (Öffner-Schalter) benötigt!
+	endschalter : FB_Interpolation_Endschalter;
+END_VAR
+VAR_OUTPUT
+	status : FB_Interpolation_status;
+END_VAR
+VAR
+	_state : FB_Interpolation_State := FB_Interpolation_State.STAND_BY;
+	
+	_deltaX : LREAL;
+	_deltaY : LREAL;
+	
+	_winkelAlpha : LREAL;
+	
+	_antriebRechts : FB_ServoAchse;
+	_antriebLinks : FB_ServoAchse;
+END_VAR
+
+VAR CONSTANT
+	//Die Grenzwerte die maximal angefahren werden können mit dem Verfahrschlitten
+	Y_POS_MAX : LREAL := 1500.0;
+	Y_NEG_MIN : LREAL := 350.0;
+	X_POS_MAX : LREAL := 1450.0;
+	X_NEG_MIN : LREAL := 350.0;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[
+(*
+Beschreibung:
+Der FB dient dazu den Schlitten eines H-Portals mit nur einem einizigen durchgängigen Riemen positionieren zu können.
+Die Antriebe die verwendet werden, besitzen absolut-multi-turn Drehgeber. Eine referenzierfahrt ist somit hinnfällig.
+Besonders ist, dass ein abgegebener Fahrauftrag nicht zu ende gefahren werden muss. Es ist möglich einen aktuelleren
+Fahrauftrag abzugeben und damit einen aktuellen Fahrauftrag abzulösen.
+
+Datum: 2017/JAN/11
+Version: 1.0.0.0
+
+Autor: P. Hahn
+	
+Benötigte Bibliotheken:
+	-> Tc2_MC2
+	
+Benötigte FB´s:
+	-> FB_ServoAchse
+
+	
+Benötigte Lizensen:
+	-> TF5000
+*)
+
+
+CASE _state OF
+		
+	FB_Interpolation_State.STAND_BY:
+		//Achsen Enablen
+		IF cmd.enable THEN
+			cmd.enable := FALSE;
+			status.busy := TRUE;
+			_antriebLinks.cmd.enable := TRUE;
+			_antriebRechts.cmd.enable := TRUE; 
+			_state := FB_Interpolation_State.ENABLE;
+			
+		//Verfahre auf absolute Position	
+		ELSIF cmd.fahreAbs THEN
+			cmd.fahreAbs := FALSE;
+			status.busy := TRUE;
+			//Kontrollieren ob die Achse enabled ist
+			IF status.enabled THEN
+				IF checkLimitPos() THEN
+					//Die beiden anzufahrenden Positionswerte für den jeweiligen Antrieb errechnen
+					//Dabei gilt:
+					//MotorLinksPos = X + Y
+					//MotorRechtsPos = X - Y
+					_antriebLinks.cmd.position := cmd.position_X + cmd.position_Y;
+					_antriebRechts.cmd.position := cmd.position_X - cmd.position_Y;
+					//Die Geschwindigkeit für die Achsen ermitteln
+					speedConfig();
+					//Das verfahren starten
+					_antriebLinks.cmd.fahreAbs := TRUE;
+					_antriebRechts.cmd.fahreAbs := TRUE;
+					//In den nächsten State springen
+					_state := FB_Interpolation_State.FAHRE_ABSOLUT;
+				ELSE
+					//Mache nichts, denn als nächstes wird in den ErrorHandler gesprungen
+				END_IF
+			ELSE
+				callError('Es wurde ein absoluter Fahrbefehl gegeben während die Achsen nicht enabled sind');
+			END_IF
+			
+		//Hand-verfahren (Tippbetrieb) --> Es ist darauf zu achten, dass für beide Antriebe der AX-Parameter "Manual Velocity (Slow)" gleich groß ist! 
+		ELSIF cmd.hand.Y_pos OR cmd.hand.Y_neg OR cmd.hand.X_pos OR cmd.hand.X_neg THEN
+			status.busy := TRUE;
+			//Überprüfen ob die Achsen enabled sind
+			IF status.enabled THEN
+				IF cmd.hand.Y_pos THEN
+					_state := FB_Interpolation_State.HAND_Y_POS;
+				ELSIF cmd.hand.Y_neg THEN
+					_state := FB_Interpolation_State.HAND_Y_NEG;
+				ELSIF cmd.hand.X_pos THEN
+					_state := FB_Interpolation_State.HAND_X_POS;
+				ELSIF cmd.hand.X_neg THEN
+					_state := FB_Interpolation_State.HAND_X_NEG;
+				END_IF
+			ELSE
+				callError('Es wurde ein Hand-Fahrbefehl gegeben während die Achse nicht enabled ist');
+			END_IF
+		END_IF
+		
+	
+	//Die Antriebe enablen	
+	FB_Interpolation_State.ENABLE:
+		//Warten bis die beiden Achsen enabled sind, dann zurückspringen in Standby
+		IF _antriebLinks.Status.enabled AND NOT _antriebLinks.Status.error AND 
+		_antriebRechts.Status.enabled AND NOT _antriebRechts.Status.error THEN
+			status.busy := FALSE;
+			_state := FB_Interpolation_State.STAND_BY;
+		ELSIF _antriebLinks.Status.error OR _antriebRechts.Status.error THEN
+			callError('Beim enablen der beiden Achsen ist ein Fehler aufgetreten');
+		END_IF
+
+		
+	//Eine Absolute Fahrbewegung durchführen		
+	FB_Interpolation_State.FAHRE_ABSOLUT:		
+		//Sollte während der Fahrt ein aktuellerer Fahrauftrag abgegeben werden, so wird dieser übernommen
+		IF cmd.fahreAbs THEN
+			cmd.fahreAbs := FALSE;
+			IF checkLimitPos() THEN
+				//Neue Positionen aus den Koordinaten berechnen
+				_antriebLinks.cmd.position := cmd.position_X + cmd.position_Y;
+				_antriebRechts.cmd.position := cmd.position_X - cmd.position_Y;
+				//Die Geschwindigkeit für die Achsen ermitteln
+				speedConfig();
+				//Das verfahren starten
+				_antriebLinks.cmd.fahreAbs := TRUE;
+				_antriebRechts.cmd.fahreAbs := TRUE;
+			ELSE
+					//Mache nichts, denn als nächstes wird in den ErrorHandler gesprungen
+			END_IF
+		//Sonst warten bis die Achse ihren Fahrauftrag abgeschlossen hat.
+		ELSIF positionCheck(zielPos_X := cmd.position_X, zielPos_Y := cmd.position_Y) AND NOT _antriebLinks.status.error AND
+		NOT _antriebRechts.status.error THEN
+			status.busy := FALSE;
+			_state := FB_Interpolation_State.STAND_BY;
+		ELSIF _antriebLinks.status.error OR _antriebRechts.status.error THEN
+			callError('Während der Absolutfahrt ist ein Fehler aufgetreten');
+		END_IF	
+	
+
+	//Hand-verfahren Y-Richtung positiv
+	FB_Interpolation_State.HAND_Y_POS:
+		_antriebLinks.cmd.hand.pos := cmd.hand.Y_pos;	
+		_antriebRechts.cmd.hand.neg := cmd.hand.Y_pos;	
+		IF _antriebLinks.status.error OR _antriebRechts.status.error THEN
+			callError('Während des Hand-Fahrens in positive Y-Richtung ist ein Fehler aufgetreten');
+		ELSIF NOT cmd.hand.Y_pos THEN
+			status.busy := FALSE;
+			_state := FB_Interpolation_State.STAND_BY;
+		END_IF
+	
+		
+	//Hand-verfahren Y-Richtung negativ
+	FB_Interpolation_State.HAND_Y_NEG:
+		_antriebLinks.cmd.hand.neg := cmd.hand.Y_neg;	
+		_antriebRechts.cmd.hand.pos := cmd.hand.Y_neg;	
+		IF _antriebLinks.status.error OR _antriebRechts.status.error THEN
+			callError('Während des Hand-Fahrens in negative Y-Richtung ist ein Fehler aufgetreten');
+		ELSIF NOT cmd.hand.Y_neg THEN
+			status.busy := FALSE;
+			_state := FB_Interpolation_State.STAND_BY;
+		END_IF
+		
+		
+	//Hand-verfahren X-Richtung positiv
+	FB_Interpolation_State.HAND_X_POS:
+		_antriebLinks.cmd.hand.pos := cmd.hand.X_pos;	
+		_antriebRechts.cmd.hand.pos := cmd.hand.X_pos;	
+		IF _antriebLinks.status.error OR _antriebRechts.status.error THEN
+			callError('Während des Hand-Fahrens in positive X-Richtung ist ein Fehler aufgetreten');
+		ELSIF NOT cmd.hand.X_pos THEN
+			status.busy := FALSE;
+			_state := FB_Interpolation_State.STAND_BY;
+		END_IF
+		
+		
+	//Hand-verfahren X-Richtung negativ
+	FB_Interpolation_State.HAND_X_NEG:
+		_antriebLinks.cmd.hand.neg := cmd.hand.X_neg;	
+		_antriebRechts.cmd.hand.neg := cmd.hand.X_neg;	
+		IF _antriebLinks.status.error OR _antriebRechts.status.error THEN
+			callError('Während des Hand-Fahrens in negative X-Richtung ist ein Fehler aufgetreten');
+		ELSIF NOT cmd.hand.X_neg THEN
+			status.busy := FALSE;
+			_state := FB_Interpolation_State.STAND_BY;
+		END_IF
+		
+		
+		
+	FB_Interpolation_State.ERROR_HANDLER:
+		status.error := TRUE;
+		status.busy := FALSE;
+		//Warten auf reset	
+		IF cmd.reset THEN
+			cmd.reset := FALSE;
+			IF _antriebLinks.status.error THEN
+				_antriebLinks.cmd.reset := TRUE;
+			END_IF
+			IF _antriebRechts.status.error THEN
+				_antriebRechts.cmd.reset := TRUE;
+			END_IF
+			status.error := FALSE;
+			status.errorMeldung := '';
+			_state := FB_Interpolation_State.STAND_BY;
+		END_IF	
+END_CASE
+
+
+//Da ein Disable-Befehl zu jedem Zeitpunkt möglich sein soll wird dieser Befehl auserhalb der Statemachine abgefragt!
+IF cmd.disable THEN
+	cmd.disable := FALSE;
+	_antriebLinks.cmd.disable := TRUE;
+	_antriebRechts.cmd.disable := TRUE;
+	status.busy := FALSE;
+END_IF
+
+
+//Da ein Halt-Befehl zu jedem Zeitpunkt möglich sein soll wird dieser Befehl auserhalb der Statemachine abgefragt!
+IF cmd.halt THEN
+	cmd.halt := FALSE;
+	status.busy := FALSE;
+	_antriebLinks.cmd.halt := TRUE;
+	_antriebRechts.cmd.halt := TRUE;
+	_state := FB_Interpolation_State.STAND_BY;
+END_IF
+
+
+//Sollte ein Fehler auftreten der nicht innerhalb der State-Machine abgefangen wurde wird das hier gemacht
+IF _antriebLinks.status.error AND NOT _antriebRechts.status.error THEN
+	callError('Der Antrieb links meldet einen Fehler');
+ELSIF _antriebRechts.status.error AND NOT _antriebLinks.status.error THEN
+	callError('Der Antrieb links meldet einen Fehler');
+ELSIF _antriebLinks.status.error AND _antriebRechts.status.error THEN
+	callError('Beide Antriebe melden einen Fehler');
+END_IF
+
+
+
+
+//Die Endschalter für beide Antriebe beschalten um die Richtungsfreigaben zu setzen.
+//Da theoretisch mit jedem Antrieb jeder Endschalter erreicht werden kann, müssen die entsprechenden Endschalter in beziehung zueinander gebracht werden.
+_antriebLinks.endschalter.pos := endschalter.Y_oben AND endschalter.X_rechts;
+_antriebLinks.endschalter.neg := endschalter.Y_unten AND endschalter.X_links;
+_antriebRechts.endschalter.pos := endschalter.Y_unten AND endschalter.X_rechts;
+_antriebRechts.endschalter.neg := endschalter.Y_oben AND endschalter.X_links;
+
+
+//===============================================================================
+//						Aufruf der beiden Antriebs-SteuerFB´s
+//===============================================================================
+_antriebLinks();
+_antriebRechts();
+
+
+//===============================================================================
+//						Den aktuellen Status ausgeben
+//===============================================================================
+status.bewegungAktiv := _antriebLinks.status.bewegungAktiv OR _antriebRechts.status.bewegungAktiv;
+
+status.enabled := _antriebLinks.status.enabled AND _antriebRechts.status.enabled;
+
+status.positionErreicht := positionCheck(zielPos_X := cmd.position_X, zielPos_Y := cmd.position_Y);
+
+//Die Aktuelle Position im Koordinatensystem zyklisch ermitteln.
+(*Herleitung: 
+	MotorLinksPos = X + Y 
+	MotorRechtsPos = X - Y	--> X = MotorRechtsPos + Y
+	
+->	MotorLinksPos = (MotorRechtsPos + Y) + Y	
+==> Y = (MotorLinksPos - MotorRechtsPos) / 2	
+
+==> X = MotorLinksPos - ((MotorLinksPos - MotorRechtsPos) / 2)	--> X = MotorLinksPos - Y
+*)
+status.positionAktuell_Y := (_antriebLinks.status.positionAktuell - _antriebRechts.status.positionAktuell) / 2.0;
+status.positionAktuell_X := _antriebLinks.status.positionAktuell - status.positionAktuell_Y;
+
+
+
+]]></ST>
+    </Implementation>
+    <Method Name="callError" Id="{05271c8e-0b43-4377-8498-7e581709b7ce}">
+      <Declaration><![CDATA[METHOD PROTECTED callError
+VAR_INPUT
+	errorMeldung : STRING(255);
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[status.errorMeldung := errorMeldung;
+_state := FB_Interpolation_State.ERROR_HANDLER;
+RETURN;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="checkLimitPos" Id="{3d311a27-2fb8-452f-a67f-5389e49a919e}">
+      <Declaration><![CDATA[METHOD PROTECTED checkLimitPos : BOOL
+VAR_INPUT
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+
+//Überprüfen ob die Nutzereingabe innerhalb der Grenzwerte liegt; ansonsten Fehlermeldung
+checkLimitPos := FALSE;
+
+IF (cmd.position_X < X_NEG_MIN OR cmd.position_X > X_POS_MAX) AND
+(cmd.position_Y < Y_NEG_MIN OR cmd.position_Y > Y_POS_MAX) THEN
+	callError('Beide angegebenen Positionswerte liegen auserhalb des gültigen Bereichs');
+ELSIF cmd.position_X < X_NEG_MIN OR cmd.position_X > X_POS_MAX THEN
+	callError('Der angegebene Positionswert für die X-Koordinate liegt auserhalb des gültigen Bereichs');
+ELSIF cmd.position_Y < Y_NEG_MIN OR cmd.position_Y > Y_POS_MAX THEN
+	callError('Der angegebene Positionswert für die Y-Koordinate liegt auserhalb des gültigen Bereichs');
+ELSE
+	checkLimitPos := TRUE;
+END_IF
+RETURN;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="positionCheck" Id="{fc864df0-8e7d-45e5-bc8f-53a9b969a202}">
+      <Declaration><![CDATA[METHOD PROTECTED positionCheck : BOOL
+VAR_INPUT
+	zielPos_X : LREAL;
+	zielPos_Y : LREAL;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+
+
+IF (status.positionAktuell_X >= zielPos_X - 0.1) AND (status.positionAktuell_X <= zielPos_X + 0.1) AND
+	(status.positionAktuell_Y >= zielPos_Y - 0.1) AND (status.positionAktuell_Y <= zielPos_Y + 0.1) THEN
+	positionCheck := TRUE;
+ELSE
+	positionCheck := FALSE;
+END_IF
+RETURN;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="speedConfig" Id="{f6e78707-8a0c-4e33-bb94-430d72a7a436}">
+      <Declaration><![CDATA[METHOD PROTECTED speedConfig
+VAR_INPUT
+END_VAR
+VAR
+	distanzAntriebRechts : LREAL;
+	distanzAntriebLinks : LREAL;
+	faktor : LREAL;
+END_VAR
+
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+
+
+
+
+IF geschwinInterpolieren THEN
+	//Für die Geschwindigkeitsinterpolation das Delta zwischen dem Zielpunkt und dem Startpunkt ermitteln
+	_deltaX := cmd.position_X - status.positionAktuell_X;
+	_deltaY := cmd.position_Y - status.positionAktuell_Y;
+	
+	//Anpassung von zu kleinen Werten
+	IF _deltaX <= 1.0 AND _deltaX >= -1.0 THEN
+		_deltaX := 0.0;
+	END_IF
+	IF _deltaY <= 1.0 AND _deltaY >= -1.0 THEN
+		_deltaY := 0.0;
+	END_IF
+	
+	//Interpolierte geschwindigkeitsanteile Errechnen
+	//Dabei muss abgefangen werden, dass nicht durch 0 geteilt wird!
+	IF _deltaX <> 0.0 AND _deltaY <> 0.0 THEN
+		//Den Winkel errechnen und vom Bogenmaß (RAD) in Grad umrechnen um dem Programmierer interpretierbare Werte zu liefern
+		_winkelAlpha := (ATAN(_deltaY/_deltaX) * 180.0) / Tc2_System.PI;
+		
+		//Winkel wieder ins Bogenamß umrechnen, da die SPS damit weiter rechnen muss
+		_winkelAlpha := (_winkelAlpha * Tc2_System.PI) / 180.0;
+		
+		//Geschwindigkeitsanteile errechnen
+		_antriebLinks.cmd.geschwindigkeit := ABS((COS(_winkelAlpha) + SIN(_winkelAlpha)) * cmd.geschwindigkeit);
+		_antriebRechts.cmd.geschwindigkeit := ABS((COS(_winkelAlpha) - SIN(_winkelAlpha)) * cmd.geschwindigkeit);
+	ELSE	
+		//Geschwindigkeitsanteile errechnen
+		_antriebLinks.cmd.geschwindigkeit := cmd.geschwindigkeit;
+		_antriebRechts.cmd.geschwindigkeit := cmd.geschwindigkeit;
+	END_IF
+	
+ELSE
+	_antriebLinks.cmd.geschwindigkeit := cmd.geschwindigkeit;
+	_antriebRechts.cmd.geschwindigkeit := cmd.geschwindigkeit;
+END_IF
+]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

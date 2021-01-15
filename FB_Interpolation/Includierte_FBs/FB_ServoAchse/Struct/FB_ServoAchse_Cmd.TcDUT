@@ -1,0 +1,18 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4018.5">
+  <DUT Name="FB_ServoAchse_Cmd" Id="{283a869b-65f9-4f42-b638-ee290c316174}">
+    <Declaration><![CDATA[TYPE FB_ServoAchse_Cmd :
+STRUCT
+	enable 			: BOOL;
+	disable			: BOOL;
+	hand			: FB_ServoAchse_Hand;
+	fahreAbs		: BOOL;
+	position		: LREAL;
+	geschwindigkeit	: LREAL;
+	halt			: BOOL;
+	reset 			: BOOL;
+END_STRUCT
+END_TYPE
+]]></Declaration>
+  </DUT>
+</TcPlcObject>

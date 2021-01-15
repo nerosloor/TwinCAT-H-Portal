@@ -1,0 +1,14 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4018.5">
+  <DUT Name="FB_Interpolation_Endschalter" Id="{5df4c1aa-33c1-4f91-9fa1-fb466d48146b}">
+    <Declaration><![CDATA[TYPE FB_Interpolation_Endschalter :
+STRUCT
+	Y_oben AT %I* : BOOL;
+	Y_unten AT %I* : BOOL;
+	X_rechts AT %I* : BOOL;
+	X_links AT %I* : BOOL;
+END_STRUCT
+END_TYPE
+]]></Declaration>
+  </DUT>
+</TcPlcObject>

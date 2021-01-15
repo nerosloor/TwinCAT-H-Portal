@@ -1,0 +1,14 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4018.5">
+  <DUT Name="FB_ServoAchse_Hand" Id="{813c13a1-e098-49f0-b10d-4d85669df82f}">
+    <Declaration><![CDATA[TYPE FB_ServoAchse_Hand :
+STRUCT
+	//Verfahren in positive Richtung
+	pos : BOOL;
+	//Verfahren in negative Richtung
+	neg : BOOL;
+END_STRUCT
+END_TYPE
+]]></Declaration>
+  </DUT>
+</TcPlcObject>

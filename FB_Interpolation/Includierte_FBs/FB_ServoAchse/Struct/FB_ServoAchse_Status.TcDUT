@@ -1,0 +1,18 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4018.5">
+  <DUT Name="FB_ServoAchse_Status" Id="{d567dfd8-fc08-4a2b-8712-ad31c190544a}">
+    <Declaration><![CDATA[TYPE FB_ServoAchse_Status :
+STRUCT
+	busy				: BOOL;
+	error				: BOOL;
+	errorMeldung 		: STRING(255);
+	enabled				: BOOL;
+	bewegungAktiv 		: BOOL;
+	geschwindAktuell 	: LREAL;
+	positionAktuell		: LREAL;
+	positionErreicht 	: BOOL;
+END_STRUCT
+END_TYPE
+]]></Declaration>
+  </DUT>
+</TcPlcObject>

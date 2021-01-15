@@ -1,0 +1,14 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4018.5">
+  <DUT Name="FB_ServoAchse_Endschalter" Id="{19effc6a-a419-4cd0-adef-9608ca06868d}">
+    <Declaration><![CDATA[TYPE FB_ServoAchse_Endschalter :
+STRUCT
+	//Positive Drehrichtung
+	pos AT %I* : BOOL;
+	//Negative Drehrichtung
+	neg AT %I* : BOOL;
+END_STRUCT
+END_TYPE
+]]></Declaration>
+  </DUT>
+</TcPlcObject>

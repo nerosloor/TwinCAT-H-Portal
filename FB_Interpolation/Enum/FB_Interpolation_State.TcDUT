@@ -1,0 +1,19 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4018.5">
+  <DUT Name="FB_Interpolation_State" Id="{1c1110b6-4085-4778-8bc9-e14be883e8f4}">
+    <Declaration><![CDATA[TYPE FB_Interpolation_State :
+(
+	UNDEFINIERT := 0,
+	STAND_BY,
+	ENABLE,
+	FAHRE_ABSOLUT,
+	HAND_Y_POS,
+	HAND_Y_NEG,
+	HAND_X_POS,
+	HAND_X_NEG,
+	ERROR_HANDLER
+);
+END_TYPE
+]]></Declaration>
+  </DUT>
+</TcPlcObject>
